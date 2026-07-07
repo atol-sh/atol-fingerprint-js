@@ -1,0 +1,67 @@
+{
+  "name": "@atol-sh/fingerprint",
+  "version": "0.1.0",
+  "description": "Browser device-signal collection for Atol Device Intelligence",
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      },
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "CHANGELOG.md",
+    "NOTICE"
+  ],
+  "sideEffects": false,
+  "engines": {
+    "node": ">=18"
+  },
+  "author": "Atol",
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "prepublishOnly": "npm run typecheck && npm test && npm run build",
+    "verify:pack": "publint && attw --pack . --profile node16"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/atol-sh/atol-fingerprint-js.git"
+  },
+  "homepage": "https://atol.sh",
+  "keywords": [
+    "atol",
+    "fingerprint",
+    "device-fingerprinting",
+    "device-intelligence",
+    "bot-detection",
+    "fraud-detection",
+    "browser-signals"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "devDependencies": {
+    "@arethetypeswrong/cli": "^0.18.4",
+    "happy-dom": "^20.10.2",
+    "publint": "^0.3.21",
+    "tsup": "^8.0.0",
+    "typescript": "^5.7.0",
+    "vitest": "^4.1.8"
+  },
+  "license": "Apache-2.0"
+}
