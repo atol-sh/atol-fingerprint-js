@@ -16,7 +16,7 @@ server-side; the browser never makes trust decisions.
 
 This package is a standalone SDK, but it's also an optional companion to
 [`@atol-sh/js`](https://www.npmjs.com/package/@atol-sh/js) and
-[`@atol-sh/react`](https://www.npmjs.com/package/@atol-sh/react) — install it
+[`@atol-sh/react`](https://www.npmjs.com/package/@atol-sh/react) - install it
 alongside either to enable device intelligence (bot/VPN/tamper signals) in
 those SDKs.
 
@@ -34,11 +34,17 @@ import { AtolFingerprint, isCollectionDisabled } from "@atol-sh/fingerprint";
 // Collect signals once at load time.
 const fp = await AtolFingerprint.load({
   endpoint: "https://api.atol.sh", // default
-  apiKey: "<bearer token>",        // or pass per-call via identify({ token })
 });
 
 // Submit to the control plane.
-const result = await fp.identify();
+const result = await fp.identify({
+  authorize: async ({ method, url }) => {
+    const { token, proof } = await acquireTenantAuthorization(method, url);
+    return proof
+      ? { scheme: "DPoP", accessToken: token, dpopProof: proof }
+      : { scheme: "Bearer", accessToken: token };
+  },
+});
 
 if (isCollectionDisabled(result)) {
   // User opted out (config) or browser sent Global Privacy Control (gpc).
@@ -51,8 +57,11 @@ if (isCollectionDisabled(result)) {
 const signals = fp.getSignals();
 ```
 
-`identify({ token })` overrides the configured bearer token per call, e.g.
-with an OIDC access token from the Atol React SDK.
+`identify({ authorize })` calls the credential owner for the exact POST URL
+immediately before dispatch. The callback returns either a Bearer token or an
+inseparable DPoP token/proof pair. Neither the callback nor its result is
+stored by the collector. The control plane derives the organization, user,
+and session from that verified authorization.
 
 ## Server contract
 
@@ -77,7 +86,7 @@ interface IdentifyResult {
   platform: string;
   browser: string;
   os_version: string;
-  signals: SmartSignals | null;
+  signals: SmartSignals;
 }
 
 interface SmartSignals {
@@ -90,16 +99,25 @@ interface SmartSignals {
   emulator: boolean;
   rooted: boolean;
   geo_mismatch: boolean;
+  device_mismatch: boolean;
+  device_shared: boolean;
+  shared_user_count: number;
   anomaly_score: number; // [0, 1]; 0 = clean, 1 = highly suspicious
 }
 ```
 
-Non-2xx responses make `identify()` throw an `Error` containing the HTTP
-status and response body. There is no silent fallback.
+Failures make `identify()` throw `IdentifyRequestError`, with a closed `code`
+and an HTTP `status` when a response was received. The SDK validates the exact
+response shape and does not coerce missing fields or return unknown members.
+Raw response bodies, status text, request URLs, and caught browser values are
+never retained on the error. Identify requests omit ambient credentials and
+referrers, bypass browser caching, and reject redirects. There is no silent
+fallback.
 
 All types (`ClientSignals`, `SmartSignals`, `IdentifyResult`,
-`FingerprintConfig`, `CollectionDisabled`) and the `isCollectionDisabled`
-type guard are exported from the package root for downstream SDKs.
+`IdentifyOptions`, `FingerprintConfig`, `CollectionDisabled`) and the
+`isCollectionDisabled` type guard are exported from the package root for downstream SDKs.
+`IdentifyRequestError` and `IdentifyRequestErrorCode` are exported there too.
 
 ## What is collected
 
@@ -143,16 +161,18 @@ this browser SDK.
 
 1. `load()` reads the signals above in the browser. No network traffic.
 2. `identify()` POSTs them to `https://api.atol.sh/api/v1/devices/identify`
-   (or your configured `endpoint`) with a bearer token.
+   (or your configured `endpoint`) with an operation-scoped Bearer token or
+   DPoP token/proof pair bound to that exact POST URL.
 3. The control plane hashes the signals, matches them against known devices
    for your tenant, evaluates smart signals, and returns `IdentifyResult`.
 4. The returned `device_id` and `signals` feed OPA policies
    (`input.device.*`) for step-up auth and fraud decisions.
 
-This SDK is collect-and-submit only: it keeps nothing across calls. Every durable
-device record - the profile, its fingerprint history, and the session binding -
-lives server-side in the Atol control plane, retained per Atol's device-data
-retention policy, never in the browser.
+The loaded agent retains only its configured endpoint and collected signal
+snapshot in memory. It never retains authorization material and writes no
+durable browser state. Every durable device record - the profile, its
+fingerprint history, and the session binding - lives server-side in the Atol
+control plane, retained per Atol's device-data retention policy.
 
 ## Privacy & compliance
 
@@ -200,12 +220,13 @@ const fp = await AtolFingerprint.load({ respectGPC: false });
 
 ## Troubleshooting
 
-- **`identify()` throws with a 401/403** - the bearer token is missing, expired,
-  or wrong for the target tenant. Pass a fresh token via `identify({ token })`
-  or the `apiKey` config option.
-- **`identify()` throws with the HTTP status and body in the message** - this is
-  by design; there is no silent fallback. Inspect the body for the control
-  plane's error detail.
+- **`identify()` throws with a 401/403** - the authorization is expired,
+  mismatched to the target tenant, or missing its DPoP proof. A missing or
+  malformed authorization owner is rejected locally before dispatch. Acquire
+  the token and proof together via `identify({ authorize })`.
+- **`identify()` throws `IdentifyRequestError`** - inspect its closed `code`
+  and optional numeric `status`. The SDK deliberately does not expose raw
+  server or browser diagnostics.
 - **`getSignals()` / `identify()` return `{ collection_disabled: true }`
   unexpectedly** - check `reason`. `"gpc"` means the browser sent Global
   Privacy Control; pass `respectGPC: false` if you have an independent legal

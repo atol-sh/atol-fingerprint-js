@@ -40,15 +40,6 @@ export interface ClientSignals {
 export interface FingerprintConfig {
   /** Control plane endpoint, e.g. "https://api.atol.sh". */
   endpoint?: string;
-  /** Bearer token for authenticating with the control plane. */
-  apiKey?: string;
-  /**
-   * Session token (the user session's `jti`) to bind the identified device to.
-   * Optional: when omitted, the control plane binds the device to the session
-   * of the authenticating Bearer token (its `jti` claim). Set this explicitly
-   * only when identifying on behalf of a session other than the bearer's.
-   */
-  sessionToken?: string;
   /**
    * Disable all signal collection and submission (consent opt-out).
    * When true, no browser signals are read and `identify()`/`getSignals()`
@@ -62,6 +53,38 @@ export interface FingerprintConfig {
    * have another legal basis for collection.
    */
   respectGPC?: boolean;
+}
+
+/** Exact request metadata presented to the operation-scoped credential owner. */
+export interface IdentifyAuthorizationRequest {
+  method: "POST";
+  url: string;
+}
+
+/**
+ * Authorization material for one identify request. DPoP credentials are an
+ * inseparable token/proof pair; a Bearer token cannot accidentally be sent
+ * under the DPoP scheme or vice versa.
+ */
+export type IdentifyAuthorization =
+  | {
+      scheme: "Bearer";
+      accessToken: string;
+    }
+  | {
+      scheme: "DPoP";
+      accessToken: string;
+      dpopProof: string;
+    };
+
+/**
+ * Credentials are acquired for the exact request immediately before
+ * dispatch. The callback and its result are never retained by the agent.
+ */
+export interface IdentifyOptions {
+  authorize?: (
+    request: Readonly<IdentifyAuthorizationRequest>
+  ) => Promise<IdentifyAuthorization>;
 }
 
 /**
@@ -80,6 +103,9 @@ export interface SmartSignals {
   emulator: boolean;
   rooted: boolean;
   geo_mismatch: boolean;
+  device_mismatch: boolean;
+  device_shared: boolean;
+  shared_user_count: number;
   /** Composite anomaly score in [0, 1]. 0 = clean, 1 = highly suspicious. */
   anomaly_score: number;
 }
@@ -99,8 +125,8 @@ export interface IdentifyResult {
   platform: string;
   browser: string;
   os_version: string;
-  /** Null only if the server produced no smart-signal evaluation. */
-  signals: SmartSignals | null;
+  /** Exact smart-signal evaluation produced by the control plane. */
+  signals: SmartSignals;
 }
 
 /**

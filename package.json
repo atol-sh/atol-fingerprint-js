@@ -1,6 +1,6 @@
 {
   "name": "@atol-sh/fingerprint",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Browser device-signal collection for Atol Device Intelligence",
   "type": "module",
   "main": "./dist/index.cjs",
@@ -33,7 +33,7 @@
   "scripts": {
     "build": "tsup",
     "dev": "tsup --watch",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc --project tsconfig.tests.json",
     "test": "vitest run",
     "prepublishOnly": "npm run typecheck && npm test && npm run build",
     "verify:pack": "publint && attw --pack . --profile node16"

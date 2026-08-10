@@ -4,6 +4,9 @@ import type {
   ClientSignals,
   CollectionDisabled,
   FingerprintConfig,
+  IdentifyAuthorization,
+  IdentifyAuthorizationRequest,
+  IdentifyOptions,
   IdentifyResult,
 } from "./types";
 
@@ -11,20 +14,32 @@ export type {
   ClientSignals,
   CollectionDisabled,
   FingerprintConfig,
+  IdentifyAuthorization,
+  IdentifyAuthorizationRequest,
+  IdentifyOptions,
   IdentifyResult,
   SmartSignals,
 } from "./types";
 export { isCollectionDisabled } from "./types";
 export { collectSignals } from "./collect";
-export { submitSignals } from "./submit";
+export {
+  IdentifyRequestError,
+  submitSignals,
+  type IdentifyRequestErrorCode,
+} from "./submit";
 
 /**
  * Main entry point for the Atol fingerprint SDK.
  *
  * Usage:
  * ```ts
- * const fp = await AtolFingerprint.load({ apiKey: "ak_..." });
- * const result = await fp.identify();
+ * const fp = await AtolFingerprint.load();
+ * const result = await fp.identify({
+ *   authorize: async () => ({
+ *     scheme: "Bearer",
+ *     accessToken: await acquireTenantAccessToken(),
+ *   }),
+ * });
  * if (!isCollectionDisabled(result)) {
  *   console.log(result.device_id, result.signals?.bot);
  * }
@@ -32,16 +47,16 @@ export { submitSignals } from "./submit";
  */
 export class AtolFingerprint {
   private readonly signals: ClientSignals | null;
-  private readonly config: FingerprintConfig;
+  private readonly endpoint: string | undefined;
   private readonly disabledReason: CollectionDisabled["reason"] | null;
 
   private constructor(
     signals: ClientSignals | null,
-    config: FingerprintConfig,
+    endpoint: string | undefined,
     disabledReason: CollectionDisabled["reason"] | null
   ) {
     this.signals = signals;
-    this.config = config;
+    this.endpoint = endpoint;
     this.disabledReason = disabledReason;
   }
 
@@ -54,12 +69,14 @@ export class AtolFingerprint {
    * Control and `config.respectGPC` is not explicitly set to false.
    */
   static async load(config: FingerprintConfig = {}): Promise<AtolFingerprint> {
+    const endpoint =
+      typeof config.endpoint === "string" ? config.endpoint : undefined;
     const reason = disabledReason(config);
     if (reason !== null) {
-      return new AtolFingerprint(null, config, reason);
+      return new AtolFingerprint(null, endpoint, reason);
     }
     const signals = await collectSignals();
-    return new AtolFingerprint(signals, config, null);
+    return new AtolFingerprint(signals, endpoint, null);
   }
 
   /** True when collection is disabled (explicit opt-out or GPC). */
@@ -73,16 +90,13 @@ export class AtolFingerprint {
    * signals. Returns a `CollectionDisabled` result (and performs no network
    * request) when collection is disabled.
    *
-   * @param options.token - Override the Bearer token (e.g., OIDC access token from the React SDK).
+   * @param options.authorize - Acquire authorization for this exact request.
    */
-  async identify(options?: { token?: string }): Promise<IdentifyResult | CollectionDisabled> {
+  async identify(options?: IdentifyOptions): Promise<IdentifyResult | CollectionDisabled> {
     if (this.disabledReason !== null || this.signals === null) {
       return { collection_disabled: true, reason: this.disabledReason ?? "config" };
     }
-    const config = options?.token
-      ? { ...this.config, apiKey: options.token }
-      : this.config;
-    return submitSignals(this.signals, config);
+    return submitSignals(this.signals, { endpoint: this.endpoint }, options);
   }
 
   /**

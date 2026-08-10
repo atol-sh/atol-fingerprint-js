@@ -23,7 +23,21 @@ describe("isCollectionDisabled", () => {
       platform: "browser",
       browser: "Firefox",
       os_version: "",
-      signals: null,
+      signals: {
+        bot: false,
+        vpn: false,
+        proxy: false,
+        tor: false,
+        incognito: false,
+        tampered: false,
+        emulator: false,
+        rooted: false,
+        geo_mismatch: false,
+        device_mismatch: false,
+        device_shared: false,
+        shared_user_count: 1,
+        anomaly_score: 0,
+      },
     };
     expect(isCollectionDisabled(result)).toBe(false);
   });

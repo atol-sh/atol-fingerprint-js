@@ -1,7 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { submitSignals } from "../src/submit";
-import type { ClientSignals, IdentifyResult } from "../src/types";
+import { IdentifyRequestError, submitSignals } from "../src/submit";
+import type {
+  ClientSignals,
+  IdentifyOptions,
+  IdentifyResult,
+} from "../src/types";
 
 function makeSignals(): ClientSignals {
   return {
@@ -54,6 +58,9 @@ function makeResult(): IdentifyResult {
       emulator: false,
       rooted: false,
       geo_mismatch: false,
+      device_mismatch: false,
+      device_shared: false,
+      shared_user_count: 1,
       anomaly_score: 0,
     },
   };
@@ -66,6 +73,14 @@ function okResponse(body: unknown): Response {
   });
 }
 
+function bearerAuthorization(
+  accessToken = "tenant_access_token"
+): IdentifyOptions {
+  return {
+    authorize: async () => ({ scheme: "Bearer", accessToken }),
+  };
+}
+
 afterEach(() => {
   vi.unstubAllGlobals();
 });
@@ -75,19 +90,27 @@ describe("submitSignals", () => {
     const fetchMock = vi.fn().mockResolvedValue(okResponse(makeResult()));
     vi.stubGlobal("fetch", fetchMock);
 
-    await submitSignals(makeSignals(), {});
+    await submitSignals(makeSignals(), {}, bearerAuthorization());
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const [url, init] = fetchMock.mock.calls[0];
     expect(url).toBe("https://api.atol.sh/api/v1/devices/identify");
     expect(init.method).toBe("POST");
+    expect(init.cache).toBe("no-store");
+    expect(init.credentials).toBe("omit");
+    expect(init.redirect).toBe("error");
+    expect(init.referrerPolicy).toBe("no-referrer");
   });
 
   it("uses a custom endpoint and strips trailing slashes", async () => {
     const fetchMock = vi.fn().mockResolvedValue(okResponse(makeResult()));
     vi.stubGlobal("fetch", fetchMock);
 
-    await submitSignals(makeSignals(), { endpoint: "https://api.example.test///" });
+    await submitSignals(
+      makeSignals(),
+      { endpoint: "https://api.example.test///" },
+      bearerAuthorization()
+    );
 
     const [url] = fetchMock.mock.calls[0];
     expect(url).toBe("https://api.example.test/api/v1/devices/identify");
@@ -98,69 +121,243 @@ describe("submitSignals", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     const signals = makeSignals();
-    await submitSignals(signals, {});
+    await submitSignals(signals, {}, bearerAuthorization());
 
     const [, init] = fetchMock.mock.calls[0];
     const body = JSON.parse(init.body);
+    expect(Object.keys(body).sort()).toEqual([
+      "client_platform",
+      "client_signals",
+    ]);
     expect(body.client_platform).toBe("browser");
     expect(body.client_signals).toEqual(signals);
   });
 
-  it("sets Content-Type and Authorization headers when apiKey is present", async () => {
+  it("acquires Bearer authorization for the exact request", async () => {
     const fetchMock = vi.fn().mockResolvedValue(okResponse(makeResult()));
     vi.stubGlobal("fetch", fetchMock);
+    const authorize = vi.fn().mockResolvedValue({
+      scheme: "Bearer",
+      accessToken: "tenant_access_token",
+    });
 
-    await submitSignals(makeSignals(), { apiKey: "ak_test_123" });
+    await submitSignals(makeSignals(), {}, { authorize });
 
     const [, init] = fetchMock.mock.calls[0];
+    expect(authorize).toHaveBeenCalledWith({
+      method: "POST",
+      url: "https://api.atol.sh/api/v1/devices/identify",
+    });
+    expect(Object.isFrozen(authorize.mock.calls[0][0])).toBe(true);
     expect(init.headers["Content-Type"]).toBe("application/json");
-    expect(init.headers["Authorization"]).toBe("Bearer ak_test_123");
+    expect(init.headers["Authorization"]).toBe("Bearer tenant_access_token");
+    expect(init.headers).not.toHaveProperty("DPoP");
   });
 
-  it("omits the Authorization header when no apiKey is configured", async () => {
+  it("sends an inseparable DPoP token and proof pair", async () => {
     const fetchMock = vi.fn().mockResolvedValue(okResponse(makeResult()));
     vi.stubGlobal("fetch", fetchMock);
 
-    await submitSignals(makeSignals(), {});
+    await submitSignals(makeSignals(), {}, {
+      authorize: async () => ({
+        scheme: "DPoP",
+        accessToken: "tenant_dpop_token",
+        dpopProof: "request_bound_proof",
+      }),
+    });
 
     const [, init] = fetchMock.mock.calls[0];
-    expect(init.headers["Authorization"]).toBeUndefined();
+    expect(init.headers["Authorization"]).toBe("DPoP tenant_dpop_token");
+    expect(init.headers.DPoP).toBe("request_bound_proof");
+  });
+
+  it("rejects a missing authorization owner before dispatch", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const error = await submitSignals(makeSignals(), {}).catch(
+      (caught: unknown) => caught
+    );
+
+    expect(error).toMatchObject({
+      name: "IdentifyRequestError",
+      code: "identify_authorization_required",
+      status: null,
+      message: "Atol identify requires an operation-scoped authorization owner.",
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("projects authorization failures without retaining caught values", async () => {
+    const fetchMock = vi.fn();
+    const sentinel = "sentinel-secret-authorization-error";
+    vi.stubGlobal("fetch", fetchMock);
+
+    const error = await submitSignals(makeSignals(), {}, {
+      authorize: async () => {
+        throw new Error(sentinel);
+      },
+    }).catch((caught: unknown) => caught);
+
+    expect(error).toMatchObject({
+      name: "IdentifyRequestError",
+      code: "identify_authorization_failed",
+      status: null,
+      message: "Atol identify authorization could not be acquired.",
+    });
+    expect(JSON.stringify(error)).not.toContain(sentinel);
+    expect(String(error)).not.toContain(sentinel);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects mixed or invented authorization shapes before dispatch", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const error = await submitSignals(makeSignals(), {}, {
+      authorize: async () =>
+        ({
+          scheme: "Bearer",
+          accessToken: "sentinel-secret-token",
+          dpopProof: "invented-proof",
+        }) as never,
+    }).catch((caught: unknown) => caught);
+
+    expect(error).toMatchObject({
+      code: "identify_authorization_failed",
+      status: null,
+    });
+    expect(JSON.stringify(error)).not.toContain("sentinel-secret-token");
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it("returns the parsed server response", async () => {
     const expected = makeResult();
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(okResponse(expected)));
 
-    const result = await submitSignals(makeSignals(), {});
+    const result = await submitSignals(
+      makeSignals(),
+      {},
+      bearerAuthorization()
+    );
     expect(result).toEqual(expected);
   });
 
-  it("throws on non-2xx with the status and response body", async () => {
+  it("projects non-2xx responses without consuming or retaining their body", async () => {
+    const sentinel = "sentinel-secret-server-response";
+    const response = new Response(sentinel, {
+      status: 404,
+      statusText: "Sentinel Secret Status",
+    });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response));
+
+    const error = await submitSignals(makeSignals(), {}, bearerAuthorization()).catch(
+      (caught: unknown) => caught
+    );
+
+    expect(error).toBeInstanceOf(IdentifyRequestError);
+    expect(error).toMatchObject({
+      name: "IdentifyRequestError",
+      code: "identify_http_rejected",
+      status: 404,
+      message: "Atol identify request was rejected with HTTP 404.",
+    });
+    expect(response.bodyUsed).toBe(false);
+    expect(JSON.stringify(error)).not.toContain(sentinel);
+    expect(String(error)).not.toContain(sentinel);
+  });
+
+  it("projects network failures without retaining the caught value", async () => {
+    const sentinel = "sentinel-secret-network-value";
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error(sentinel)));
+
+    const error = await submitSignals(makeSignals(), {}, bearerAuthorization()).catch(
+      (caught: unknown) => caught
+    );
+
+    expect(error).toMatchObject({
+      name: "IdentifyRequestError",
+      code: "identify_transport_failed",
+      status: null,
+      message: "Atol identify request could not reach the control plane.",
+    });
+    expect(JSON.stringify(error)).not.toContain(sentinel);
+    expect(String(error)).not.toContain(sentinel);
+  });
+
+  it("projects invalid success bodies without retaining parser diagnostics", async () => {
+    const sentinel = "sentinel-secret-invalid-json";
     vi.stubGlobal(
       "fetch",
       vi.fn().mockResolvedValue(
-        new Response("organization not found", { status: 404, statusText: "Not Found" })
+        new Response(sentinel, {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        })
       )
     );
 
-    await expect(submitSignals(makeSignals(), {})).rejects.toThrow(
-      /Atol identify request failed: 404.*organization not found/
+    const error = await submitSignals(makeSignals(), {}, bearerAuthorization()).catch(
+      (caught: unknown) => caught
     );
+
+    expect(error).toMatchObject({
+      name: "IdentifyRequestError",
+      code: "identify_response_invalid",
+      status: 200,
+      message: "Atol identify response did not match the response contract.",
+    });
+    expect(JSON.stringify(error)).not.toContain(sentinel);
+    expect(String(error)).not.toContain(sentinel);
   });
 
-  it("throws on 500 even when the error body is unreadable", async () => {
-    const response = new Response(null, { status: 500, statusText: "Internal Server Error" });
-    vi.spyOn(response, "text").mockRejectedValue(new Error("stream error"));
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response));
+  it("rejects a JSON response with missing or invented members", async () => {
+    const malformed: Record<string, unknown> = {
+      ...makeResult(),
+      diagnostic: "sentinel-secret-success-diagnostic",
+    };
+    malformed.signals = {
+      ...(malformed.signals as Record<string, unknown>),
+    };
+    delete (malformed.signals as Record<string, unknown>).device_shared;
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(okResponse(malformed)));
 
-    await expect(submitSignals(makeSignals(), {})).rejects.toThrow(
-      /Atol identify request failed: 500/
-    );
+    const error = await submitSignals(
+      makeSignals(),
+      {},
+      bearerAuthorization()
+    ).catch((caught: unknown) => caught);
+
+    expect(error).toMatchObject({
+      name: "IdentifyRequestError",
+      code: "identify_response_invalid",
+      status: 200,
+      message: "Atol identify response did not match the response contract.",
+    });
+    expect(JSON.stringify(error)).not.toContain(malformed.diagnostic);
+    expect(String(error)).not.toContain(malformed.diagnostic);
   });
 
-  it("propagates network errors from fetch", async () => {
-    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new TypeError("Failed to fetch")));
+  it("rejects a success response with null smart signals", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        okResponse({
+          ...makeResult(),
+          signals: null,
+        })
+      )
+    );
 
-    await expect(submitSignals(makeSignals(), {})).rejects.toThrow("Failed to fetch");
+    const error = await submitSignals(
+      makeSignals(),
+      {},
+      bearerAuthorization()
+    ).catch((caught: unknown) => caught);
+
+    expect(error).toMatchObject({
+      code: "identify_response_invalid",
+      status: 200,
+    });
   });
 });

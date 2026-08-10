@@ -1,7 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { AtolFingerprint, isCollectionDisabled } from "../src/index";
-import type { IdentifyResult } from "../src/index";
+import {
+  AtolFingerprint,
+  IdentifyRequestError,
+  isCollectionDisabled,
+} from "../src/index";
+import type { FingerprintConfig, IdentifyResult } from "../src/index";
 
 const SERVER_RESULT: IdentifyResult = {
   device_id: "dev_01XYZ",
@@ -21,13 +25,18 @@ const SERVER_RESULT: IdentifyResult = {
     emulator: false,
     rooted: false,
     geo_mismatch: false,
+    device_mismatch: false,
+    device_shared: false,
+    shared_user_count: 1,
     anomaly_score: 0,
   },
 };
 
 function stubFetch() {
-  const fetchMock = vi.fn().mockResolvedValue(
-    new Response(JSON.stringify(SERVER_RESULT), { status: 200 })
+  const fetchMock = vi.fn().mockImplementation(
+    () => Promise.resolve(
+      new Response(JSON.stringify(SERVER_RESULT), { status: 200 })
+    )
   );
   vi.stubGlobal("fetch", fetchMock);
   return fetchMock;
@@ -58,40 +67,90 @@ describe("AtolFingerprint", () => {
     expect(fp.disabled).toBe(false);
   });
 
+  it("retains only allowlisted configuration fields", async () => {
+    const sentinel = "sentinel-secret-legacy-config";
+    const fp = await AtolFingerprint.load({
+      endpoint: "https://api.example.test",
+      apiKey: sentinel,
+      sessionToken: sentinel,
+    } as FingerprintConfig & {
+      apiKey: string;
+      sessionToken: string;
+    });
+
+    expect(JSON.stringify(fp)).not.toContain(sentinel);
+    expect(fp).not.toHaveProperty("config");
+    expect(fp).toHaveProperty("endpoint", "https://api.example.test");
+  });
+
   it("identify() submits the collected signals and returns the server result", async () => {
     const fetchMock = stubFetch();
-    const fp = await AtolFingerprint.load({ apiKey: "ak_live_1" });
+    const fp = await AtolFingerprint.load();
 
-    const result = await fp.identify();
+    const result = await fp.identify({
+      authorize: async () => ({
+        scheme: "Bearer",
+        accessToken: "tenant_access_token_one",
+      }),
+    });
 
     expect(isCollectionDisabled(result)).toBe(false);
     expect(result).toEqual(SERVER_RESULT);
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const [, init] = fetchMock.mock.calls[0];
-    expect(init.headers["Authorization"]).toBe("Bearer ak_live_1");
+    expect(init.headers["Authorization"]).toBe(
+      "Bearer tenant_access_token_one"
+    );
     const body = JSON.parse(init.body);
     expect(body.client_platform).toBe("browser");
     expect(body.client_signals).toEqual(fp.getSignals());
   });
 
-  it("identify({ token }) overrides the configured apiKey", async () => {
+  it("scopes an authorization owner to one identify operation", async () => {
     const fetchMock = stubFetch();
-    const fp = await AtolFingerprint.load({ apiKey: "ak_live_1" });
+    const fp = await AtolFingerprint.load();
 
-    await fp.identify({ token: "oidc_access_token" });
+    await fp.identify({
+      authorize: async () => ({
+        scheme: "Bearer",
+        accessToken: "tenant_access_token_one",
+      }),
+    });
+    const missing = await fp.identify().catch((caught: unknown) => caught);
 
-    const [, init] = fetchMock.mock.calls[0];
-    expect(init.headers["Authorization"]).toBe("Bearer oidc_access_token");
+    const [, firstInit] = fetchMock.mock.calls[0];
+    expect(firstInit.headers["Authorization"]).toBe(
+      "Bearer tenant_access_token_one"
+    );
+    expect(missing).toMatchObject({
+      code: "identify_authorization_required",
+      status: null,
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
-  it("identify() propagates server errors", async () => {
+  it("identify() exposes only the closed server-rejection diagnostic", async () => {
+    const sentinel = "sentinel-secret-server-response";
     vi.stubGlobal(
       "fetch",
-      vi.fn().mockResolvedValue(new Response("authentication required", { status: 400 }))
+      vi.fn().mockResolvedValue(new Response(sentinel, { status: 400 }))
     );
     const fp = await AtolFingerprint.load();
 
-    await expect(fp.identify()).rejects.toThrow(/Atol identify request failed: 400/);
+    const error = await fp.identify({
+      authorize: async () => ({
+        scheme: "Bearer",
+        accessToken: "tenant_access_token",
+      }),
+    }).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(IdentifyRequestError);
+    expect(error).toMatchObject({
+      code: "identify_http_rejected",
+      status: 400,
+      message: "Atol identify request was rejected with HTTP 400.",
+    });
+    expect(JSON.stringify(error)).not.toContain(sentinel);
+    expect(String(error)).not.toContain(sentinel);
   });
 
   describe("disabled option", () => {
@@ -159,7 +218,12 @@ describe("AtolFingerprint", () => {
       const fp = await AtolFingerprint.load({ respectGPC: false });
       expect(fp.disabled).toBe(false);
 
-      const result = await fp.identify();
+      const result = await fp.identify({
+        authorize: async () => ({
+          scheme: "Bearer",
+          accessToken: "tenant_access_token",
+        }),
+      });
       expect(isCollectionDisabled(result)).toBe(false);
     });
 
